@@ -60,40 +60,24 @@ trait FastLevel3 extends Level3 {
       fld.get(classOf[Unsafe]).asInstanceOf[Unsafe]
     }
 
-    private def get(p:Long, i:Int) = unsafe.getDouble(p + i*8)
-
-    private def put(p:Long, i:Int, v:Double) { unsafe.putDouble(p + i*8, v) }
-
-    def newBuffer(size:Int) = unsafe.allocateMemory(size*8)
-
-    def resizeBuffer(start:Long,
-                     size:Int) = unsafe.reallocateMemory(start, size*8)
-
-    def freeBuffer(start:Long) { unsafe.freeMemory(start) }
-
     /** The blocking policy and buffers used by GEBP */
     class Blocking(val mc:Int, val kc:Int,
                    val mr:Int, val nr:Int,
                    val np:Int) {
 
       /** Buffer to store a block of A of size mc x kc */
-      val bufferA = newBuffer(mc*kc)
+      val bufferA = new Array[Double](mc*kc)
 
-      private var actualBufferB = newBuffer(kc*np)
+      private var actualBufferB = new Array[Double](kc*np)
       private var actualBufferBCols = np
 
       /** Buffer to store a panel of B of size kc x n */
       def bufferB(n:Int) = {
         if(n >= actualBufferBCols) {
-          actualBufferB = resizeBuffer(actualBufferB, kc*n)
+          actualBufferB = new Array[Double](kc*n)
           actualBufferBCols = n
         }
         actualBufferB
-      }
-
-      override def finalize() {
-        freeBuffer(bufferA)
-        freeBuffer(actualBufferB)
       }
     }
 
@@ -120,10 +104,10 @@ trait FastLevel3 extends Level3 {
      * Requirement: nr == 2 or 4. Not enforced for performance reason,
      * i.e. using any other value will lead to disaster.
      */
-    def packColumnSlices(a:Matrix, nr:Int, aa:Long) {
+    def packColumnSlices(a:Matrix, nr:Int, aa:Array[Double]) {
       val (m,n) = a.dimensions
       val nn = (n/nr)*nr
-      var paa = aa
+      var paa = 0
       val ld = a.ld
       val o = a.start
       val e = a.elements
@@ -135,18 +119,18 @@ trait FastLevel3 extends Level3 {
         val r2 = o + (j+2)*ld
         val r3 = o + (j+3)*ld
         cforRange(0 until m) { i =>
-                      put(paa, 0, e(r0+i))
-                      put(paa, 1, e(r1+i))
-          if(nr == 4) put(paa, 2, e(r2+i))
-          if(nr == 4) put(paa, 3, e(r3+i))
-          paa += nr * 8
+                      aa(paa + 0) = e(r0+i)
+                      aa(paa + 1) = e(r1+i)
+          if(nr == 4) aa(paa + 2) = e(r2+i)
+          if(nr == 4) aa(paa + 3) = e(r3+i)
+          paa += nr
         }
       }
       cforRange(nn until n) { j =>
         val r0 = o + (j+0)*ld
         cforRange(0 until m) { i =>
-          put(paa, 0, e(r0+i))
-          paa += 1 * 8
+          aa(paa + 0) = e(r0+i)
+          paa += 1
         }
       }
     }
@@ -171,28 +155,28 @@ trait FastLevel3 extends Level3 {
      * Requirement: mr == 2 or 4. Not enforced for performance reason,
      * i.e. using any other value will lead to disaster.
      */
-    def packRowSlices(a:Matrix, mr:Int, aa:Long) {
+    def packRowSlices(a:Matrix, mr:Int, aa:Array[Double]) {
       val unsafe = this.unsafe
       val (m,n) = a.dimensions
       val mm = (m/mr)*mr
-      var paa = aa
+      var paa = 0
       val ld = a.ld
       val e = a.elements
       //cforRange(0 until mm by mr) { i =>
       cfor(0)(_ < mm, _ + mr) { i =>
         cforRange(0 until n) { j =>
           val r = i + j*ld
-                      put(paa, 0, e(r+0))
-                      put(paa, 1, e(r+1))
-          if(mr == 4) put(paa, 2, e(r+2))
-          if(mr == 4) put(paa, 3, e(r+3))
-          paa += mr * 8
+                      aa(paa + 0) = e(r+0)
+                      aa(paa + 1) = e(r+1)
+          if(mr == 4) aa(paa + 2) = e(r+2)
+          if(mr == 4) aa(paa + 3) = e(r+3)
+          paa += mr
         }
       }
       cforRange(mm until m) { i =>
         cforRange(0 until n) { j =>
-          put(paa, 0, a(i,j))
-          paa += 1 * 8
+          aa(paa + 0) = a(i,j)
+          paa += 1
         }
       }
     }
@@ -222,7 +206,8 @@ trait FastLevel3 extends Level3 {
      * i.e. using any other value will lead to disaster.
      */
     def apply(kc:Int, mr:Int, nr:Int,
-              alpha:Double, aa:Long, bb:Long, beta:Double, c:Matrix)
+              alpha:Double, aa:Array[Double], bb:Array[Double],
+              beta:Double, c:Matrix)
     {
       val unsafe = this.unsafe
       val (mc, n) = c.dimensions
@@ -262,15 +247,15 @@ trait FastLevel3 extends Level3 {
           // consequences for performance.
           //
           // Hence keep it simple to help the JIT makes the right decisions.
-          var paa = aa + i*kc * 8
-          var pbb = bb + j*kc * 8
+          var paa = i*kc
+          var pbb = j*kc
           cforRange(0 until kc) { p =>
-            val a0 = get(paa, 0)
-            val a1 = get(paa, 1)
-            val b0 = get(pbb, 0)
-            val b1 = get(pbb, 1)
-            val b2 = get(pbb, 2)
-            val b3 = get(pbb, 3)
+            val a0 = aa(paa +0)
+            val a1 = aa(paa +1)
+            val b0 = bb(pbb +0)
+            val b1 = bb(pbb +1)
+            val b2 = bb(pbb +2)
+            val b3 = bb(pbb +3)
             c0 += a0*b0
             c1 += a0*b1
             c2 += a0*b2
@@ -281,8 +266,8 @@ trait FastLevel3 extends Level3 {
             c7 += a1*b3
 
             // next line
-            paa += 2 * 8
-            pbb += 4 * 8
+            paa += 2
+            pbb += 4
           }
 
           // Store result:
@@ -324,22 +309,22 @@ trait FastLevel3 extends Level3 {
           val r2 = r1 + ldC
           val r3 = r2 + ldC
 
-          var paa = aa + m2*kc * 8
-          var pbb = bb + j*kc  * 8
+          var paa = m2*kc
+          var pbb = j*kc
           cforRange(0 until kc) { p =>
-            val a0 = get(paa, 0)
-            val b0 = get(pbb, 0)
-            val b1 = get(pbb, 1)
-            val b2 = get(pbb, 2)
-            val b3 = get(pbb, 3)
+            val a0 = aa(paa +0)
+            val b0 = bb(pbb +0)
+            val b1 = bb(pbb +1)
+            val b2 = bb(pbb +2)
+            val b3 = bb(pbb +3)
             c0 += a0*b0
             c1 += a0*b1
             c2 += a0*b2
             c3 += a0*b3
 
             // next line
-            paa += 1 * 8
-            pbb += 4 * 8
+            paa += 1
+            pbb += 4
           }
 
           // Store result:
@@ -374,16 +359,16 @@ trait FastLevel3 extends Level3 {
           //   C(i:i+2, j) = [ c0 ]
           //                 [ c4 ]
           var c0, c4 = 0.0
-          var paa = aa + i*kc * 8
-          var pbb = bb + j*kc * 8
+          var paa = i*kc
+          var pbb = j*kc
           cforRange(0 until kc) { p =>
-            val a0 = get(paa, 0)
-            val a1 = get(paa, 1)
-            val b0 = get(pbb, 0)
+            val a0 = aa(paa +0)
+            val a1 = aa(paa +1)
+            val b0 = bb(pbb +0)
             c0 += a0*b0
             c4 += a1*b0
-            pbb += 1 * 8
-            paa += 2 * 8
+            pbb += 1
+            paa += 2
           }
 
           // Store results in C
@@ -402,14 +387,14 @@ trait FastLevel3 extends Level3 {
         if(m2 != mc) {
           var c0 = 0.0
           var r0 = startC + m2 + j*ldC
-          var paa = aa + m2*kc * 8
-          var pbb = bb + j*kc  * 8
+          var paa = m2*kc
+          var pbb = j*kc
           cforRange(0 until kc) { p =>
-            val a0 = get(paa, 0)
-            val b0 = get(pbb, 0)
+            val a0 = aa(paa +0)
+            val b0 = bb(pbb +0)
             c0 += a0*b0
-            pbb += 1 * 8
-            paa += 1 * 8
+            pbb += 1
+            paa += 1
           }
           c0 *= alpha
           if(beta == 1) cc(r0) += c0 else cc(r0) = beta*cc(r0) + c0
